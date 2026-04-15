@@ -93,6 +93,7 @@ class OneLayerModularTransformer(nn.Module):
             "v": v.detach(),
             "attn_scores": attn_scores.detach(),
             "attn_pattern": pattern.detach(),
+            "z": z.detach(),
             "attn_out": attn_out.detach(),
             "resid_post_attn": (resid - mlp_out).detach(),
             "mlp_pre": mlp_pre.detach(),

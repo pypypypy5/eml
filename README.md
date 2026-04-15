@@ -83,39 +83,28 @@ some scalar structure. Poor R^2 is a useful result: it means the chosen low-dept
 EML tree did not capture that node's scalar behavior under the current search
 budget.
 
-## EML Fourier Ensemble
+The default probe set uses only local node inputs and outputs:
 
-The stronger modular-addition check is `scripts/run_eml_fourier_ensemble.py`.
-It uses the recovered Fourier coordinates as the interface between the neural
-model and EML trees:
+- attention softmax: local attention scores -> one attention probability
+- attention weighted sum: local pattern weights and value scalars -> one `z` scalar
+- MLP ReLU: one MLP pre-activation -> its post-ReLU value
 
-1. Replay the public checkpoint and average logits into a kernel over
-   `d=(x+y-z) mod 113`.
-2. Fit the dominant Fourier terms of that kernel.
-3. Train one depth-4 EML tree for each learned `cos`/`sin` basis signal.
-4. Reassemble candidate logits from the learned EML tree outputs.
-5. Run `argmax_z` and measure modular-addition accuracy.
+It deliberately does not feed Fourier coordinates or `d=(x+y-z) mod p` into the
+EML tree.
 
-Run:
+## EML Matrix Probes
+
+For module-level probes, use `scripts/run_eml_matrix_probes.py`. This fits one
+vector-valued EML tree per matrix-like transform, for example `W_Q` head slices,
+`W_O`, `W_in`, `W_out`, and `W_U`.
+
+Example:
 
 ```bash
-PYTHONPATH=src .venv/bin/python scripts/run_eml_fourier_ensemble.py \
-  --steps 200 --init-noise 0.02 --top-k 5
+PYTHONPATH=src .venv/bin/python scripts/run_eml_matrix_probes.py \
+  --matrix-name W_in --depths 2,3 --steps 120 --train-n 512 --test-n 512
 ```
 
-Current result:
-
-- Depth-4 EML trees, 10 trees total: `cos` and `sin` for each frequency in
-  `[14, 35, 41, 42, 52]`.
-- Each basis tree started from the exact depth-4 EML identity tree with small
-  noise, then was trained back to the identity signal.
-- Kernel error versus the exact five-frequency Fourier formula:
-  MSE `2.59e-8`, max absolute error `3.95e-4`.
-- Assembled EML ensemble classifier:
-  accuracy `1.0`, cross entropy `4.40e-8`, minimum correct margin `18.31`.
-
-This verifies that a set of trained EML trees can be assembled into a working
-modular-addition scorer once the discrete final step is kept as `argmax`. It
-does not yet mean raw token inputs alone were converted into EML trees; the
-current interface uses the Fourier coordinates exposed by the grokking
-interpretation.
+The first run replays the checkpoint and saves each matrix node's input/output
+tensors under `runs/eml_matrix_probes/datasets/`. Later runs load those cached
+tensors directly unless `--refresh-cache` is passed.
