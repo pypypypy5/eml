@@ -116,13 +116,86 @@ class SoftEMLTree(nn.Module):
             level = next_level
         return level[0]
 
+    def init_from_expression(self, expr: str, k: float = 16.0) -> None:
+        """Initialize hard logits from a sparse EML expression.
+
+        Variables are named x0, x1, ... and must appear at leaves. Constants
+        named 1 may appear at any level and are implemented through the
+        constant-1 bypass gates.
+        """
+        parsed = parse_sparse_eml_expr(expr)
+        if sparse_expr_depth(parsed) != self.depth:
+            raise ValueError(f"Expression depth {sparse_expr_depth(parsed)} != tree depth {self.depth}")
+
+        with torch.no_grad():
+            self.leaf_logits.fill_(-k)
+            self.leaf_logits[:, 0] = k
+            self.gate_logits.fill_(k)
+
+        def flat_node_idx(level_from_top: int, pos_in_level: int) -> int:
+            return 2**self.depth - 2 ** (level_from_top + 1) + pos_in_level
+
+        def recurse(node, level: int, pos: int) -> None:
+            if isinstance(node, str):
+                if level != self.depth:
+                    if node == "1":
+                        return
+                    raise ValueError(f"Variable {node} appears above leaf level")
+                if node == "1":
+                    choice = 0
+                elif node.startswith("x"):
+                    choice = int(node[1:]) + 1
+                    if not 1 <= choice <= self.n_inputs:
+                        raise ValueError(f"Variable {node} is out of range for {self.n_inputs} inputs")
+                else:
+                    raise ValueError(f"Unknown terminal {node}")
+                with torch.no_grad():
+                    self.leaf_logits[pos].fill_(-k)
+                    self.leaf_logits[pos, choice] = k
+                return
+
+            _, left, right = node
+            node_idx = flat_node_idx(level, pos)
+            with torch.no_grad():
+                self.gate_logits[node_idx, 0] = k if left == "1" else -k
+                self.gate_logits[node_idx, 1] = k if right == "1" else -k
+            if left != "1":
+                recurse(left, level + 1, 2 * pos)
+            if right != "1":
+                recurse(right, level + 1, 2 * pos + 1)
+
+        recurse(parsed, 0, 0)
+
+
+def parse_sparse_eml_expr(s: str):
+    s = s.strip()
+    if s == "1" or (s.startswith("x") and s[1:].isdigit()):
+        return s
+    if s.startswith("EML[") and s.endswith("]"):
+        inner = s[4:-1]
+        depth = 0
+        for i, char in enumerate(inner):
+            if char == "[":
+                depth += 1
+            elif char == "]":
+                depth -= 1
+            elif char == "," and depth == 0:
+                return ("EML", parse_sparse_eml_expr(inner[:i]), parse_sparse_eml_expr(inner[i + 1 :]))
+    raise ValueError(f"Cannot parse EML expression: {s}")
+
+
+def sparse_expr_depth(node) -> int:
+    if isinstance(node, str):
+        return 0
+    return 1 + max(sparse_expr_depth(node[1]), sparse_expr_depth(node[2]))
+
 
 def standardize_train_test(
     x_train: torch.Tensor,
     y_train: torch.Tensor,
     x_test: torch.Tensor,
     y_test: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     x_mean = x_train.mean(dim=0, keepdim=True)
     x_std = x_train.std(dim=0, keepdim=True).clamp_min(1.0e-8)
     y_mean = y_train.mean()
@@ -132,6 +205,8 @@ def standardize_train_test(
         (y_train - y_mean) / y_std,
         (x_test - x_mean) / x_std,
         (y_test - y_mean) / y_std,
+        x_mean,
+        x_std,
         y_mean,
         y_std,
     )
@@ -151,15 +226,24 @@ def train_eml_probe(
     binarity_penalty: float = 1.0e-3,
     clamp: float = 1.0e6,
     out_expr_path: str | Path | None = None,
+    init_expr: str | None = None,
+    init_noise: float = 0.0,
+    return_artifacts: bool = False,
 ) -> EMLProbeResult:
     torch.manual_seed(seed)
-    x_train_s, y_train_s, x_test_s, y_test_s, y_mean, y_std = standardize_train_test(
+    x_train_s, y_train_s, x_test_s, y_test_s, x_mean, x_std, y_mean, y_std = standardize_train_test(
         x_train.to(REAL_DTYPE),
         y_train.to(REAL_DTYPE),
         x_test.to(REAL_DTYPE),
         y_test.to(REAL_DTYPE),
     )
     tree = SoftEMLTree(depth=depth, n_inputs=x_train_s.shape[1])
+    if init_expr:
+        tree.init_from_expression(init_expr)
+    if init_noise > 0:
+        with torch.no_grad():
+            for param in tree.parameters():
+                param.add_(torch.randn_like(param) * init_noise)
     opt = torch.optim.Adam(tree.parameters(), lr=lr)
     best_loss = float("inf")
     best_state = {k: v.detach().clone() for k, v in tree.state_dict().items()}
@@ -203,7 +287,7 @@ def train_eml_probe(
     if out_expr_path is not None:
         Path(out_expr_path).write_text(tree.hard_expression(["u", "v", "w"][: x_train.shape[1]]) + "\n", encoding="utf-8")
 
-    return EMLProbeResult(
+    result = EMLProbeResult(
         name=name,
         depth=depth,
         n_inputs=int(x_train.shape[1]),
@@ -220,3 +304,21 @@ def train_eml_probe(
         test_r2=float(r2),
         max_abs_error=float(max_abs_error),
     )
+    if return_artifacts:
+        return result, tree, x_mean.detach(), x_std.detach(), y_mean.detach(), y_std.detach()
+    return result
+
+
+def predict_with_artifacts(
+    tree: SoftEMLTree,
+    inputs: torch.Tensor,
+    x_mean: torch.Tensor,
+    x_std: torch.Tensor,
+    y_mean: torch.Tensor,
+    y_std: torch.Tensor,
+    tau: float = 0.05,
+) -> torch.Tensor:
+    with torch.no_grad():
+        x_s = (inputs.to(REAL_DTYPE) - x_mean) / x_std
+        pred = tree(x_s, tau_leaf=tau, tau_gate=tau)[0].real
+        return pred * y_std + y_mean
