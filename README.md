@@ -108,3 +108,31 @@ PYTHONPATH=src .venv/bin/python scripts/run_eml_matrix_probes.py \
 The first run replays the checkpoint and saves each matrix node's input/output
 tensors under `runs/eml_matrix_probes/datasets/`. Later runs load those cached
 tensors directly unless `--refresh-cache` is passed.
+
+## Full-Model IO EML Pipeline
+
+The current end-to-end pipeline is `scripts/run_full_model_eml_pipeline.py`.
+It works at the full model input/output level rather than at internal matrices:
+
+1. Replay the model on every `(x,y)` modular-addition input.
+2. Cache the full output logits under `runs/full_model_eml/datasets/`.
+3. Build candidate-level IO data: `(x,y,z) -> model_logit_z(x,y)`.
+4. Extract the Fourier formula from the cached full-model IO as a reference.
+5. Train a direct EML tree on sampled `(x,y,z) -> logit` examples and measure
+   whether it learns the same scalar function.
+
+Run a quick check:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/run_full_model_eml_pipeline.py \
+  --depth 3 --steps 200 --train-n 4096 --test-n 4096
+```
+
+To also test the trained direct EML tree as a classifier over every candidate
+`z`, add `--eval-full-grid`. This evaluates all `113^3` candidate logits and
+then applies the usual `argmax_z` rule.
+
+The Fourier extraction and the direct EML fit are intentionally reported
+separately. If the Fourier formula is excellent but the direct EML tree is poor,
+that means the model IO has the expected Fourier structure, but the strict EML
+tree did not rediscover it under the current depth/search budget.
