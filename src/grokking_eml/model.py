@@ -87,10 +87,19 @@ class OneLayerModularTransformer(nn.Module):
         if not return_cache:
             return logits
         cache = {
+            "resid_embed": (self.W_E.T[tokens] + self.W_pos[: tokens.shape[1]]).detach(),
+            "q": q.detach(),
+            "k": k.detach(),
+            "v": v.detach(),
+            "attn_scores": attn_scores.detach(),
             "attn_pattern": pattern.detach(),
+            "attn_out": attn_out.detach(),
+            "resid_post_attn": (resid - mlp_out).detach(),
             "mlp_pre": mlp_pre.detach(),
             "mlp_post": mlp_post.detach(),
+            "mlp_out": mlp_out.detach(),
             "resid_final": resid.detach(),
+            "logits": logits.detach(),
         }
         return logits, cache
 

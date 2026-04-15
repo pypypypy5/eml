@@ -52,4 +52,33 @@ The run in this workspace used checkpoint index `400` from
   accuracy `1.0`, cross entropy `4.3975e-8`.
 - EML lowering example: `Cos[(2*Pi*42*d)/113]` became a pure EML expression
   with `5729` EML nodes, written to
-  `runs/modular_addition_eml/dominant_freq_42_cos.eml`.
+`runs/modular_addition_eml/dominant_freq_42_cos.eml`.
+
+## EML Node Probes
+
+The node-probe pipeline treats the neural network up to logits as a collection
+of continuous scalar functions. It samples scalar slices such as attention
+weights, MLP pre-activations, local ReLU outputs, and candidate logits, then
+fits a small differentiable EML tree to each probe.
+
+Quick smoke run:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/run_eml_node_probes.py \
+  --depth 2 --steps 80 --train-n 128 --test-n 128 --max-probes 4
+```
+
+Targeted run for a specific node family:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/run_eml_node_probes.py \
+  --probe-name mlp_relu --depth 3 --steps 300 --train-n 512 --test-n 512 --restarts 3
+```
+
+The report is written to `runs/eml_node_probes/summary.json`. Each result
+contains normalized RMSE, original-scale RMSE, baseline RMSE,
+`rmse_baseline_ratio`, and test R^2. A ratio near `1` means the low-depth EML
+tree did no better than predicting the mean; a ratio below `1` means it captured
+some scalar structure. Poor R^2 is a useful result: it means the chosen low-depth
+EML tree did not capture that node's scalar behavior under the current search
+budget.
